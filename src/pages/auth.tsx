@@ -1,9 +1,13 @@
 import { useState, type FormEvent } from 'react'
-import { ArrowLeft, ArrowRight, Eye, EyeOff } from 'lucide-react'
-import { Link, useSearchParams } from 'react-router-dom'
+import { useMutation } from '@tanstack/react-query'
+import { ArrowLeft, ArrowRight, Eye, EyeOff, LoaderCircle } from 'lucide-react'
+import { Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { api } from '@/lib/api'
+import { useSession } from '@/lib/session'
+import { errorMessage } from '@/lib/presentation'
 
 function safeRedirect(value: string | null) {
   return value &&
@@ -13,11 +17,35 @@ function safeRedirect(value: string | null) {
     ? value
     : '/'
 }
+
 export function AuthPage({ signup = false }: { signup?: boolean }) {
   const [params] = useSearchParams()
   const redirect = safeRedirect(params.get('redirect'))
+  const auth = useSession()
+  const navigate = useNavigate()
   const [showPassword, setShowPassword] = useState(false)
   const [validationError, setValidationError] = useState('')
+  const mutation = useMutation({
+    mutationFn: async (data: FormData) => {
+      const password = String(data.get('password'))
+      if (signup) {
+        await api.signup({
+          email: String(data.get('email')).trim(),
+          password,
+          first_name: String(data.get('first_name')).trim(),
+          last_name: String(data.get('last_name')).trim(),
+        })
+        toast.success('Account created. Please sign in.')
+        navigate(`/login?redirect=${encodeURIComponent(redirect)}`, { replace: true })
+      } else {
+        await auth.signIn({ username: String(data.get('username')).trim(), password })
+        toast.success('Signed in.')
+        navigate(redirect, { replace: true })
+      }
+    },
+    retry: false,
+  })
+
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const data = new FormData(event.currentTarget)
@@ -33,14 +61,13 @@ export function AuthPage({ signup = false }: { signup?: boolean }) {
       return
     }
     setValidationError('')
-    // Lesson 22 sends the form to the backend here.
-    toast.info(
-      signup
-        ? 'Sign-up connects to the backend in Lesson 22.'
-        : 'Sign-in connects to the backend in Lesson 22.',
-    )
+    mutation.mutate(data)
   }
+
+  if (auth.isAuthenticated) return <Navigate to={redirect} replace />
+
   const otherLink = `/${signup ? 'login' : 'signup'}?redirect=${encodeURIComponent(redirect)}`
+
   return (
     <div className="page-content auth-page">
       <Link to="/" className="back-link">
@@ -147,13 +174,15 @@ export function AuthPage({ signup = false }: { signup?: boolean }) {
                 </label>
               </>
             )}
-            {validationError && (
+            {(validationError || mutation.isError) && (
               <p role="alert" className="form-error" id="auth-error">
-                {validationError}
+                {validationError || errorMessage(mutation.error)}
               </p>
             )}
-            <Button size="lg" type="submit" className="w-full">
-              {signup ? 'Create account' : 'Sign in'} <ArrowRight size={17} />
+            <Button size="lg" type="submit" disabled={mutation.isPending} className="w-full">
+              {mutation.isPending ? <LoaderCircle className="animate-spin" size={18} /> : null}
+              {signup ? 'Create account' : 'Sign in'}{' '}
+              {!mutation.isPending && <ArrowRight size={17} />}
             </Button>
           </form>
           <p className="auth-switch">

@@ -1,26 +1,83 @@
 import { useState } from 'react'
-import { ArrowLeft, ArrowRight, Heart, Plus, Search } from 'lucide-react'
-import { Link, useParams } from 'react-router-dom'
+import { useQueryClient } from '@tanstack/react-query'
+import { ArrowLeft, ArrowRight, Heart, LoaderCircle, Plus, Search } from 'lucide-react'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { FoodImage } from '@/components/food-image'
-import { EmptyState } from '@/components/feedback'
+import { CardsSkeleton, EmptyState, ErrorState } from '@/components/feedback'
+import { queryKeys, useAddToCart, useCart, useMenus, useRestaurants } from '@/lib/queries'
+import { useSession } from '@/lib/session'
 import { useFavorites } from '@/lib/favorites'
-import { money, restaurantPresentation } from '@/lib/presentation'
-import { sampleCart, sampleRestaurants } from '@/lib/sample-data'
+import { errorMessage, money, restaurantPresentation } from '@/lib/presentation'
 import type { MenuItem } from '@/lib/types'
+import { ApiError } from '@/lib/api'
 
 export function RestaurantPage() {
   const { id } = useParams()
   const restaurantId = Number(id)
-  const restaurant = sampleRestaurants.find((item) => item.id === restaurantId)
+  const restaurants = useRestaurants()
+  const menu = useMenus(restaurantId)
+  const restaurant = restaurants.data?.find((item) => item.id === restaurantId)
   const { ids, toggle } = useFavorites()
+  const { isAuthenticated, isSigningOut, sessionId } = useSession()
+  const client = useQueryClient()
+  const cart = useCart(isAuthenticated && !isSigningOut)
+  const add = useAddToCart()
   const [search, setSearch] = useState('')
-  function addItem(item: MenuItem) {
-    // Lesson 22 replaces this with a real POST /cart request.
-    toast.info(`${item.name}: adding to the cart connects to the backend in Lesson 22.`)
+  const [addingId, setAddingId] = useState<number | null>(null)
+  const navigate = useNavigate()
+  const location = useLocation()
+
+  async function addItem(item: MenuItem) {
+    if (isSigningOut) return
+    const requestSessionId = sessionId
+    const isCurrentSession = () =>
+      client.getQueryData<{ sessionId: string }>(queryKeys.session)?.sessionId === requestSessionId
+    if (!isAuthenticated) {
+      navigate(`/login?redirect=${encodeURIComponent(location.pathname)}`)
+      return
+    }
+    setAddingId(item.id)
+    try {
+      await add.mutateAsync(item.id)
+      if (!isCurrentSession()) return
+      toast.success(`${item.name} added to your cart`, {
+        action: { label: 'View cart', onClick: () => navigate('/cart') },
+      })
+    } catch (error) {
+      const activeSession = client.getQueryData(queryKeys.session)
+      if (
+        !isCurrentSession() &&
+        !(error instanceof ApiError && error.status === 401 && activeSession === null)
+      )
+        return
+      toast.error(errorMessage(error))
+      if (error instanceof ApiError && error.status === 401)
+        navigate(`/login?redirect=${encodeURIComponent(location.pathname)}`)
+    } finally {
+      setAddingId(null)
+    }
   }
+
+  if (restaurants.isLoading)
+    return (
+      <div className="page-content">
+        <CardsSkeleton />
+      </div>
+    )
+  if (restaurants.isError)
+    return (
+      <div className="page-content">
+        <ErrorState
+          error={restaurants.error}
+          retry={() => {
+            void restaurants.refetch()
+          }}
+        />
+      </div>
+    )
   if (!restaurant)
     return (
       <div className="page-content">
@@ -35,12 +92,13 @@ export function RestaurantPage() {
         />
       </div>
     )
-  const menu = restaurant.menu_items ?? []
-  const meta = restaurantPresentation(restaurant, menu)
-  const items = menu.filter((item) =>
+
+  const meta = restaurantPresentation(restaurant, menu.data)
+  const items = (menu.data ?? []).filter((item) =>
     `${item.name} ${item.description ?? ''}`.toLowerCase().includes(search.toLowerCase().trim()),
   )
-  const cartCount = sampleCart.order_items.reduce((sum, item) => sum + (item.quantity ?? 1), 0)
+  const cartCount = cart.data?.order_items.reduce((sum, item) => sum + (item.quantity ?? 1), 0) ?? 0
+
   return (
     <div className="page-content menu-page">
       <Link to="/" className="back-link">
@@ -71,7 +129,7 @@ export function RestaurantPage() {
       <div className="menu-toolbar">
         <div>
           <h2>Menu</h2>
-          <p>{menu.length} dishes</p>
+          <p>{menu.data?.length ?? 0} dishes</p>
         </div>
         <div className="menu-search">
           <Search size={17} />
@@ -83,7 +141,16 @@ export function RestaurantPage() {
           />
         </div>
       </div>
-      {!items.length ? (
+      {menu.isLoading ? (
+        <CardsSkeleton />
+      ) : menu.isError ? (
+        <ErrorState
+          error={menu.error}
+          retry={() => {
+            void menu.refetch()
+          }}
+        />
+      ) : !items.length ? (
         <EmptyState
           title={search ? 'No matching dishes' : 'No menu items available'}
           description={
@@ -112,9 +179,16 @@ export function RestaurantPage() {
                     size="icon"
                     className="add-button"
                     aria-label={`Add ${item.name} to cart`}
-                    onClick={() => addItem(item)}
+                    disabled={add.isPending || isSigningOut}
+                    onClick={() => {
+                      void addItem(item)
+                    }}
                   >
-                    <Plus size={19} />
+                    {addingId === item.id ? (
+                      <LoaderCircle size={18} className="animate-spin" />
+                    ) : (
+                      <Plus size={19} />
+                    )}
                   </Button>
                 </div>
               </div>
@@ -131,10 +205,10 @@ export function RestaurantPage() {
         Have a food allergy? Contact the restaurant before ordering.
         {restaurant.phone && <a href={`tel:${restaurant.phone}`}>{restaurant.phone}</a>}
       </p>
-      {cartCount > 0 && (
+      {!!cart.data?.order_items.length && (
         <div className="floating-cart">
           <span>
-            {cartCount} {cartCount === 1 ? 'item' : 'items'} · {money(sampleCart.total_price)}
+            {cartCount} {cartCount === 1 ? 'item' : 'items'} · {money(cart.data.total_price)}
           </span>
           <Button asChild>
             <Link to="/cart">

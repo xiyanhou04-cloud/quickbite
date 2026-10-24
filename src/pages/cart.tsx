@@ -1,16 +1,20 @@
-import { ArrowLeft, ArrowRight, Check } from 'lucide-react'
+import { useRef, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
+import { ArrowLeft, ArrowRight, Check, LoaderCircle } from 'lucide-react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
-import { EmptyState } from '@/components/feedback'
-import { money } from '@/lib/presentation'
-import { sampleCart } from '@/lib/sample-data'
+import { Skeleton } from '@/components/ui/skeleton'
+import { EmptyState, ErrorState } from '@/components/feedback'
+import { queryKeys, useCart, useCheckout } from '@/lib/queries'
+import { useSession } from '@/lib/session'
+import { errorMessage, money } from '@/lib/presentation'
 import type { Cart } from '@/lib/types'
 
 function CartLines({ cart, compact = false }: { cart: Cart; compact?: boolean }) {
   return (
     <ul className={compact ? 'cart-lines compact' : 'cart-lines'}>
       {cart.order_items.map((item, index) => (
-        <li key={item.id ?? `${item.menu_item_name}-${index}`}>
+        <li key={item.order_item_id ?? `${item.menu_item_name}-${index}`}>
           <span className="cart-item-quantity" aria-label={`Quantity ${item.quantity ?? 1}`}>
             {item.quantity ?? 1}
           </span>
@@ -23,17 +27,61 @@ function CartLines({ cart, compact = false }: { cart: Cart; compact?: boolean })
     </ul>
   )
 }
+
 export function CartPage({ checkout = false }: { checkout?: boolean }) {
+  const session = useSession()
+  const cart = useCart(session.isAuthenticated && !session.isSigningOut)
+  const order = useCheckout()
+  const client = useQueryClient()
   const navigate = useNavigate()
-  const data = sampleCart
-  function placeOrder() {
-    // Lesson 22 sends POST /cart/checkout before showing the confirmation.
-    navigate('/order-confirmation', {
-      replace: true,
-      state: { receipt: data, placedAt: new Date().toISOString() },
-    })
+  const submitting = useRef(false)
+  const [submitError, setSubmitError] = useState('')
+  const [needsReview, setNeedsReview] = useState(false)
+
+  async function placeOrder() {
+    if (!cart.data?.order_items.length || submitting.current || needsReview || session.isSigningOut)
+      return
+    const requestSessionId = session.sessionId
+    const isCurrentSession = () =>
+      client.getQueryData<{ sessionId: string }>(queryKeys.session)?.sessionId === requestSessionId
+    submitting.current = true
+    setSubmitError('')
+    const receipt = structuredClone(cart.data)
+    try {
+      await order.mutateAsync()
+      if (!isCurrentSession()) return
+      navigate('/order-confirmation', {
+        replace: true,
+        state: { receipt, placedAt: new Date().toISOString(), sessionId: requestSessionId },
+      })
+    } catch (error) {
+      if (!isCurrentSession()) return
+      setSubmitError(errorMessage(error))
+      setNeedsReview(true)
+    } finally {
+      submitting.current = false
+    }
   }
-  if (!data.order_items.length)
+
+  if (cart.isLoading)
+    return (
+      <div className="page-content" role="status" aria-label="Loading your cart">
+        <Skeleton className="mb-5 h-12 w-60" />
+        <Skeleton className="h-80 rounded-2xl" />
+      </div>
+    )
+  if (cart.isError)
+    return (
+      <div className="page-content">
+        <ErrorState
+          error={cart.error}
+          retry={() => {
+            void cart.refetch()
+          }}
+        />
+      </div>
+    )
+  if (!cart.data?.order_items.length)
     return (
       <div className="page-content">
         <div className="page-intro">
@@ -55,7 +103,10 @@ export function CartPage({ checkout = false }: { checkout?: boolean }) {
         />
       </div>
     )
+
+  const data = cart.data
   const count = data.order_items.reduce((sum, item) => sum + (item.quantity ?? 1), 0)
+
   return (
     <div className="page-content cart-page">
       <Link to={checkout ? '/cart' : '/'} className="back-link">
@@ -88,10 +139,39 @@ export function CartPage({ checkout = false }: { checkout?: boolean }) {
             <strong>{money(data.total_price)}</strong>
           </div>
           <p className="summary-caption">Total provided by the restaurant.</p>
+          {submitError && (
+            <div role="alert" className="form-error">
+              <p>{submitError}</p>
+              <p className="mt-2">
+                Your order may have been received. Review your cart before trying again.
+              </p>
+            </div>
+          )}
           {checkout ? (
-            <Button size="lg" className="w-full" onClick={placeOrder}>
-              Place order
-            </Button>
+            needsReview ? (
+              <Button asChild size="lg" className="w-full">
+                <Link
+                  to="/cart"
+                  onClick={() => {
+                    void cart.refetch()
+                  }}
+                >
+                  Review cart <ArrowRight size={17} />
+                </Link>
+              </Button>
+            ) : (
+              <Button
+                size="lg"
+                className="w-full"
+                disabled={order.isPending || cart.isFetching || session.isSigningOut}
+                onClick={() => {
+                  void placeOrder()
+                }}
+              >
+                {order.isPending && <LoaderCircle className="animate-spin" size={17} />}{' '}
+                {order.isPending ? 'Placing your order…' : 'Place order'}
+              </Button>
+            )
           ) : (
             <Button asChild size="lg" className="w-full">
               <Link to="/checkout">
@@ -109,10 +189,13 @@ export function CartPage({ checkout = false }: { checkout?: boolean }) {
     </div>
   )
 }
+
 export function ConfirmationPage() {
   const location = useLocation()
-  const state = location.state as { receipt?: Cart; placedAt?: string } | null
-  if (!state?.receipt)
+  const session = useSession()
+  const state = location.state as { receipt?: Cart; placedAt?: string; sessionId?: string } | null
+
+  if (!state?.receipt || !session.sessionId || state.sessionId !== session.sessionId)
     return (
       <div className="page-content">
         <EmptyState
@@ -126,6 +209,7 @@ export function ConfirmationPage() {
         />
       </div>
     )
+
   return (
     <div className="page-content confirmation-page">
       <div className="confirmation-mark">

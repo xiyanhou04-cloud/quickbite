@@ -10,8 +10,10 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog'
+import { useSession } from '@/lib/session'
+import { AccountMenu } from '@/components/account-menu'
+import { useCart } from '@/lib/queries'
 import { useFavorites } from '@/lib/favorites'
-import { sampleCart } from '@/lib/sample-data'
 import { cn } from '@/lib/utils'
 
 export function Brand() {
@@ -84,12 +86,15 @@ function HelpDialog() {
 }
 
 export function Layout() {
-  const count = sampleCart.order_items.reduce((sum, item) => sum + (item.quantity ?? 1), 0)
+  const { isAuthenticated, isSigningOut } = useSession()
+  const cart = useCart(isAuthenticated && !isSigningOut)
+  const count = cart.data?.order_items.reduce((sum, item) => sum + (item.quantity ?? 1), 0) ?? 0
   const navigate = useNavigate()
   const location = useLocation()
   const [search, setSearch] = useState('')
   const searchInput = useRef<HTMLInputElement>(null)
   const searchQuery = new URLSearchParams(location.search).get('q') || ''
+
   useEffect(() => {
     setSearch(searchQuery)
     window.scrollTo({ top: 0, behavior: 'instant' })
@@ -108,9 +113,7 @@ export function Layout() {
     if (searchQuery) {
       const params = new URLSearchParams(location.search)
       params.delete('q')
-      navigate(location.pathname + (params.size ? '?' + params : ''), {
-        replace: true,
-      })
+      navigate(location.pathname + (params.size ? '?' + params : ''), { replace: true })
     }
   }
 
@@ -149,12 +152,16 @@ export function Layout() {
             </button>
           </form>
           <div className="header-actions">
-            <Button asChild variant="ghost" className="account-button">
-              <Link to="/login" aria-label="Sign in">
-                <UserRound size={19} />
-                <span>Sign in</span>
-              </Link>
-            </Button>
+            {isAuthenticated ? (
+              <AccountMenu />
+            ) : (
+              <Button asChild variant="ghost" className="account-button">
+                <Link to="/login" aria-label="Sign in">
+                  <UserRound size={19} />
+                  <span>Sign in</span>
+                </Link>
+              </Button>
+            )}
             <Button asChild className="header-cart">
               <Link to="/cart" aria-label={'Your cart, ' + count + ' items'}>
                 <ShoppingBag size={18} />

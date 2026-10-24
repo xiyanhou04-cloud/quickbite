@@ -1,23 +1,35 @@
+import { useQueries } from '@tanstack/react-query'
 import { ArrowRight, SlidersHorizontal, X } from 'lucide-react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { RestaurantCard } from '@/components/restaurant-card'
-import { EmptyState } from '@/components/feedback'
+import { CardsSkeleton, EmptyState, ErrorState } from '@/components/feedback'
+import { useRestaurants, queryKeys } from '@/lib/queries'
+import { api } from '@/lib/api'
 import { categories, restaurantPresentation } from '@/lib/presentation'
 import { useFavorites } from '@/lib/favorites'
-import { sampleRestaurants } from '@/lib/sample-data'
 import { cn } from '@/lib/utils'
 
 export function DiscoverPage({ savedOnly = false }: { savedOnly?: boolean }) {
+  const restaurants = useRestaurants()
   const { ids } = useFavorites()
   const [params, setParams] = useSearchParams()
   const search = params.get('q')?.trim().toLowerCase() || ''
   const category = params.get('category') || 'All'
   const sort = params.get('sort') || 'recommended'
-  const filtered = sampleRestaurants
-    .filter((restaurant) => {
+  const menuQueries = useQueries({
+    queries: (restaurants.data ?? []).map((restaurant) => ({
+      queryKey: queryKeys.menus(restaurant.id),
+      queryFn: () => api.getMenus(restaurant.id),
+      enabled: !!search || category !== 'All',
+      staleTime: 5 * 60_000,
+    })),
+  })
+
+  const filtered = (restaurants.data ?? [])
+    .filter((restaurant, index) => {
       if (savedOnly && !ids.includes(restaurant.id)) return false
-      const menus = restaurant.menu_items
+      const menus = menuQueries[index]?.data ?? restaurant.menu_items
       const meta = restaurantPresentation(restaurant, menus)
       if (category !== 'All' && meta.cuisine !== category) return false
       return (
@@ -28,6 +40,7 @@ export function DiscoverPage({ savedOnly = false }: { savedOnly?: boolean }) {
       )
     })
     .sort((a, b) => (sort === 'name' ? a.name.localeCompare(b.name) : 0))
+
   function updateParam(key: string, value: string) {
     setParams(
       (previous) => {
@@ -39,6 +52,12 @@ export function DiscoverPage({ savedOnly = false }: { savedOnly?: boolean }) {
       { replace: true },
     )
   }
+
+  const searchingMenus =
+    (!!search || category !== 'All') && menuQueries.some((query) => query.isLoading)
+  const menuSearchError =
+    (!!search || category !== 'All') && menuQueries.some((query) => query.isError)
+
   return (
     <div className="page-content discover-page">
       <div className="page-intro">
@@ -88,7 +107,11 @@ export function DiscoverPage({ savedOnly = false }: { savedOnly?: boolean }) {
                   : 'Restaurants'}
             </h2>
             <p role="status">
-              {filtered.length + (filtered.length === 1 ? ' restaurant' : ' restaurants')}
+              {restaurants.isSuccess
+                ? filtered.length +
+                  (filtered.length === 1 ? ' restaurant' : ' restaurants') +
+                  (searchingMenus ? ' · Searching menus…' : '')
+                : 'Loading restaurants…'}
             </p>
           </div>
           <div className="results-controls">
@@ -107,7 +130,32 @@ export function DiscoverPage({ savedOnly = false }: { savedOnly?: boolean }) {
             </label>
           </div>
         </div>
-        {!filtered.length ? (
+        {menuSearchError && (
+          <p role="status" className="search-note">
+            Some menus couldn’t be searched. Restaurant matches are shown.{' '}
+            <button
+              onClick={() => {
+                menuQueries
+                  .filter((query) => query.isError)
+                  .forEach((query) => {
+                    void query.refetch()
+                  })
+              }}
+            >
+              Retry menu search
+            </button>
+          </p>
+        )}
+        {restaurants.isLoading ? (
+          <CardsSkeleton />
+        ) : restaurants.isError ? (
+          <ErrorState
+            error={restaurants.error}
+            retry={() => {
+              void restaurants.refetch()
+            }}
+          />
+        ) : !filtered.length && !searchingMenus ? (
           <EmptyState
             title={savedOnly && !ids.length ? 'No saved restaurants yet' : 'No restaurants found'}
             description={
@@ -132,10 +180,15 @@ export function DiscoverPage({ savedOnly = false }: { savedOnly?: boolean }) {
         ) : (
           <div className="restaurant-grid">
             {filtered.map((restaurant) => (
-              <RestaurantCard key={restaurant.id} restaurant={restaurant} />
+              <RestaurantCard
+                key={restaurant.id}
+                restaurant={restaurant}
+                menus={menuQueries[(restaurants.data ?? []).indexOf(restaurant)]?.data}
+              />
             ))}
           </div>
         )}
+        {searchingMenus && !filtered.length && <CardsSkeleton />}
       </section>
     </div>
   )
